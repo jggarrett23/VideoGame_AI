@@ -27,17 +27,17 @@ from keras.optimizers import Optimizer
 
 #Settings for the Deep Q learning
 DISCOUNT = 0.99
-REPLAY_MEMORY_SIZE = 10 #50_000  #50_000 How many last steps to keep for model training
-MIN_REPLAY_MEMORY_SIZE = 4#1000  #1_000 Minimum number of steps in a memory to start training
-MINIBATCH_SIZE = 1  #64 How many steps (samples) to use for training
-ACCUM_ITERS = 5 #64
-UPDATE_TARGET_EVERY = 2 #5  # Terminal states (end of episodes)
+REPLAY_MEMORY_SIZE = 50_000  #50_000 How many last steps to keep for model training
+MIN_REPLAY_MEMORY_SIZE = 1000  #1_000 Minimum number of steps in a memory to start training
+MINIBATCH_SIZE = 8 #How many steps (samples) to use for training
+ACCUM_ITERS = 8 #64
+UPDATE_TARGET_EVERY = 5  # Terminal states (end of episodes)
 model_name = '2x256'
-MIN_REWARD = -200  # For model save
+MIN_REWARD = -90  # For model save
 MEMORY_FRACTION = 0.20
 
 # Environment settings
-EPISODES = 3 #10_000
+EPISODES = 10_000
 
 # Exploration settings
 epsilon = 1  # not a constant, going to be decayed
@@ -297,14 +297,15 @@ class DQAgent:
     
 
 
-
-
-
-
-
-
-    
 env = retro.make(game = 'DoubleDunk-Atari2600')
+
+# For stats
+ep_rewards = [-200]
+
+# For more repetitive results
+random.seed(1)
+np.random.seed(1)
+tf.set_random_seed(1)
 
 #always run before using a model
 backend.clear_session()
@@ -334,8 +335,12 @@ for episode in tqdm(range(1, EPISODES + 1), ascii=True, unit='episodes'):
 
         # This part stays mostly the same, the change is to query a model for Q values
         if np.random.random() > epsilon:
-            # Get action from Q table
-            action = np.argmax(agent.get_qs(current_state))
+            # Get action from Q table this needs to be an array,
+            #np.clip will turn negative probabilities to 0, and positive to 1
+            positive_action = np.clip(agent.get_qs(current_state),0,1)
+
+            #round probabilities and convert array into integer
+            action = np.asarray(np.around(positive_action, decimals = -1),dtype='int8')
         else:
             # Get random action
             action = np.random.randint(0, 2, size = env.action_space.n) #actionspace is MultiBinary(8)
@@ -348,8 +353,8 @@ for episode in tqdm(range(1, EPISODES + 1), ascii=True, unit='episodes'):
         episode_reward += reward
         
         # % is called a modulus. This divides and returns the remainder. So if the remainder is 0, then render
-        #if SHOW_PREVIEW and not episode % AGGREGATE_STATS_EVERY:
-        env.render()
+        if SHOW_PREVIEW and not episode % AGGREGATE_STATS_EVERY:
+            env.render()
 
         # Every step we update replay memory and train main network
         agent.update_replay_memory((current_state, action, reward, new_state, done))
