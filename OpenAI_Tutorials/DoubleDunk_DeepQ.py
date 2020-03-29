@@ -207,7 +207,7 @@ class DQAgent:
     def create_model(self):
         model = Sequential()
 
-        model.add(Conv2D(256, (3, 3), input_shape=np.shape(env.observation_space)))  # observation_space = (250,160,3) a 250x160 RGB image.
+        model.add(Conv2D(256, (3, 3), input_shape=(60,60,3)))  # observation_space = (250,160,3) a 250x160 RGB image.
         model.add(Activation('relu'))
         model.add(MaxPooling2D(pool_size=(2, 2)))
         #model.add(Dropout(0.2))
@@ -325,6 +325,9 @@ for episode in tqdm(range(1, EPISODES + 1), ascii=True, unit='episodes'):
     # Reset environment and get initial state
     current_state = env.reset()
 
+    # Resize RGB images to make run faster
+    current_state = cv2.resize(current_state,(60,60))
+
     # Reset flag and start iterating until episode ends
     done = False
     while not done:
@@ -338,6 +341,8 @@ for episode in tqdm(range(1, EPISODES + 1), ascii=True, unit='episodes'):
             action = np.random.randint(0, 2, size = env.action_space.n) #actionspace is MultiBinary(8)
 
         new_state, reward, done, info = env.step(action)
+
+        new_state = cv2.resize(new_state,(60,60))
 
         # Transform new continous state to new discrete state and count reward
         episode_reward += reward
