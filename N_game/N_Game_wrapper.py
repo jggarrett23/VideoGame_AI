@@ -59,7 +59,7 @@ class ProcessFrame84(gym.ObservationWrapper):
     @staticmethod
     def process(frame):
         # shape of image from custom n game env
-        img = np.reshape(frame, [530, 370, 3]).astype(np.uint8)
+        img = np.reshape(frame, [84, 84, 3]).astype(np.uint8)
 
         img_gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 

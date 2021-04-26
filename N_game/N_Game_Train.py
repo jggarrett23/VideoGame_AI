@@ -13,6 +13,7 @@ from tensorboardX import SummaryWriter
 import gym_NGame
 import argparse
 import sys
+import time
 
 game_name = 'NGame-v0'
 game_path = 'D:\\Nv2-PC.exe'
@@ -23,16 +24,19 @@ checkpoint_dir = 'D:\\VideoGame_AI\\N_game\\chck_points\\'
 
 # Settings for the Deep Q learning
 GAMMA = 0.99
-BATCH_SIZE = 32
-REPLAY_SIZE = 10000
+BATCH_SIZE = 25  # 32
+REPLAY_SIZE = 50  # 10000
 LEARNING_RATE = 1e-4
-SYNC_TARGET_FRAMES = 1000
-REPLAY_START_SIZE = 10000
+SYNC_TARGET_FRAMES = 25  # 1000
+REPLAY_START_SIZE = 50  # 10000
 
 EPSILON_DECAY_LAST_FRAME = 10 ** 5
 EPSILON_START = 1.0
 EPSILON_FINAL = 0.02
 NUM_EPISODES = 2
+
+AGGREGATE_STATS_EVERY = 25
+MIN_REWARD = -200
 
 Experience = collections.namedtuple(
     'Experience', field_names=['state', 'action',
@@ -105,6 +109,9 @@ def calc_loss(batch, net, tgt_net, device="cpu"):
     rewards_v = torch.tensor(rewards).to(device)
     done_mask = torch.ByteTensor(dones).to(device)
 
+    done_mask = done_mask.to(torch.bool)
+    actions_v = actions_v.to(torch.int64)
+
     state_action_values = net(states_v).gather(1, actions_v.unsqueeze(-1)).squeeze(-1)
     next_state_values = tgt_net(next_states_v).max(1)[0]
     next_state_values[done_mask] = 0.0
@@ -114,10 +121,10 @@ def calc_loss(batch, net, tgt_net, device="cpu"):
     return nn.MSELoss()(state_action_values, expected_state_action_values)
 
 
-def save_checkpoint(state, checkpoint_dir, reward, model_dir):
+def save_checkpoint(state, checkpoint_dir, min_reward, model_dir):
     chck_path = checkpoint_dir + 'checkpoint.pt'
     torch.save(state, chck_path)
-    full_model_name = model_name + '_muReward%.2f' % reward
+    full_model_name = model_name + '_minReward%.2f' % min_reward
     model_savePath = model_dir + full_model_name
     torch.save(state['state_dict'], model_savePath + "-best.dat")
 
@@ -126,7 +133,7 @@ def load_checkpoint(checkpoint_fpath, model, optimizer):
     checkpoint = torch.load(checkpoint_fpath)
     model.load_state_dict(checkpoint['state_dict'])
     optimizer.load_state_dict(checkpoint['optimizer'])
-    return model, optimizer, checkpoint['epoch'], checkpoint['mean_reward']
+    return model, optimizer, checkpoint['epoch'], checkpoint['min_reward'], checkpoint['epsilon']
 
 
 if __name__ == "__main__":
@@ -144,10 +151,9 @@ if __name__ == "__main__":
                         help='Path to best Model')
 
     args = parser.parse_args()
+
     device = torch.device("cuda" if args.cuda else "cpu")
     print(f"Using: {device}")
-
-    NUM_EPISODES = args.nEpisodes
 
     env = wrappers.make_env(args.env)
 
@@ -163,11 +169,8 @@ if __name__ == "__main__":
 
     load_episode = 0
 
-    best_mean_reward = None
-
     if args.load_best:
-        net, optimizer, load_episode, best_mean_reward = load_checkpoint(args.checkpoint_path,
-                                                                         net, optimizer)
+        net, optimizer, load_episode, MIN_REWARD, EPSILON_START = load_checkpoint(args.checkpoint_path, net, optimizer)
         print('Model Checkpoint Loaded')
 
     writer = SummaryWriter(logdir=log_dir, comment='-' + args.env)
@@ -177,26 +180,32 @@ if __name__ == "__main__":
     agent = Agent(env, buffer)
     epsilon = EPSILON_START
 
+    print(f'Running {args.nEpisodes} episodes')
+
+    NUM_EPISODES = args.nEpisodes + load_episode + 1
+
     total_rewards = []
     frame_idx = 0
     ts_frame = 0
     ts = time.time()
 
-
-    for iEpsiode in range(NUM_EPISODES):
+    for iEpisode in range(load_episode, NUM_EPISODES):
         running_current_ep = True
-        time.sleep(.2)
+        time.sleep(.5)
         while running_current_ep:
             frame_idx += 1
             epsilon = max(EPSILON_FINAL, EPSILON_START - frame_idx / EPSILON_DECAY_LAST_FRAME)
             reward = agent.play_step(net, epsilon, device=device)
 
             if reward is not None:
+
                 total_rewards.append(reward)
                 speed = (frame_idx - ts_frame) / (time.time() - ts)
                 ts_frame = frame_idx
                 ts = time.time()
-                mean_reward = np.mean(total_rewards[-100:])
+                mean_reward = np.mean(total_rewards[-25:])
+                min_reward = min(total_rewards[-25:])
+
                 print("%d: done %d games, mean reward %.3f, eps %.2f, speed %.2f f/s" % (
                     frame_idx, len(total_rewards), mean_reward, epsilon, speed
                 ))
@@ -205,21 +214,25 @@ if __name__ == "__main__":
                 writer.add_scalar("speed", speed, frame_idx)
                 writer.add_scalar("mean_reward", mean_reward, frame_idx)
                 writer.add_scalar("reward", reward, frame_idx)
+                writer.add_scalar("min_reward", reward, frame_idx)
 
-                if best_mean_reward is None or best_mean_reward < mean_reward:
+                # update model
+                if not iEpisode % AGGREGATE_STATS_EVERY or iEpisode == 1:
 
                     checkpoint = {
-                        'epoch': iEpsiode + 1 + load_episode,
-                        'mean_reward': mean_reward,
+                        'epoch': iEpisode + 1 + load_episode,
+                        'min_reward': min_reward,
                         'state_dict': net.state_dict(),
-                        'optimizer': optimizer.state_dict()
+                        'optimizer': optimizer.state_dict(),
+                        'epsilon': epsilon
                     }
-                    save_checkpoint(checkpoint, checkpoint_dir, mean_reward, model_dir)
-                    if best_mean_reward is not None:
-                        print("Best mean reward updated %.3f -> %.3f, model saved" % (
-                            best_mean_reward, mean_reward
+                    save_checkpoint(checkpoint, checkpoint_dir, min_reward, model_dir)
+
+                    if min_reward >= MIN_REWARD:
+                        print("Best minimum reward updated %.3f -> %.3f, model saved" % (
+                            MIN_REWARD, min_reward
                         ))
-                    best_mean_reward = mean_reward
+                    MIN_REWARD = min_reward
                 reward = None
                 running_current_ep = False
 
