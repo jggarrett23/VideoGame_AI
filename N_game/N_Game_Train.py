@@ -16,7 +16,7 @@ import sys
 import time
 
 game_name = 'NGame-v0'
-game_path = 'D:\\Nv2-PC.exe'
+game_path = 'D:\\VideoGame_AI\\N_game\\Nv2-PC.exe'
 model_dir = 'D:\\VideoGame_AI\\N_game\\models\\'
 model_name = 'NGame_32Cnn_512Linear_Torch'
 log_dir = 'D:\\VideoGame_AI\\N_game\\log\\' + model_name
@@ -69,7 +69,7 @@ class Agent:
         self._reset()
 
     def _reset(self):
-        self.state = env.reset()
+        self.state, info = env.reset()
         self.total_reward = 0.0
 
     def play_step(self, net, epsilon=0.0, device='cpu'):
@@ -85,8 +85,7 @@ class Agent:
             action = int(act_v.item())
 
         # do step in the environment
-
-        new_state, reward, is_done, _ = self.env.step(action)
+        new_state, reward, is_done, truncation, _ = self.env.step(action)
 
         self.total_reward += reward
 

@@ -35,9 +35,10 @@ class MaxAndSkipEnv(gym.Wrapper):
     def reset(self):
         """Clear past frame buffer and init. to first obs. from inner env"""
         self._obs_buffer.clear()
-        obs = self.env.reset()
+        obs, info = self.env.reset()
         self._obs_buffer.append(obs)
-        return obs
+
+        return obs, info
 
 
 """
@@ -79,11 +80,11 @@ class ImageToPyTorch(gym.ObservationWrapper):
             dtype=np.float32)
 
     def observation(self, observation):
-
         return np.moveaxis(observation, 2, 0)
 
 
 class ScaledFloatFrame(gym.ObservationWrapper):
+
     def observation(self, obs):
         return np.array(obs).astype(np.float32) / 255.0
 
@@ -99,17 +100,19 @@ class BufferWrapper(gym.ObservationWrapper):
     def reset(self):
         self.buffer = np.zeros_like(self.observation_space.low,
                                     dtype=self.dtype)
-        return self.observation(self.env.reset())
+        obs, info = self.env.reset()
+        return self.observation(obs), info
 
-    def observation(self,observation):
+    def observation(self, observation):
         self.buffer[:-1] = self.buffer[1:]
         self.buffer[-1] = observation
         return self.buffer
+
 
 def make_env(env_name):
     env = gym.make(env_name)
     env = MaxAndSkipEnv(env)
     env = ProcessFrame84(env)
     env = ImageToPyTorch(env)
-    env = BufferWrapper(env,4)
+    env = BufferWrapper(env, 4)
     return ScaledFloatFrame(env)

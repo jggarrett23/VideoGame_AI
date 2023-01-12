@@ -39,10 +39,10 @@ class N_Game_Env(gym.Env):
         super(N_Game_Env, self).__init__()
 
         # bounds for amount of time left. Necessary for reward
-        self.time_left_bounds = (85, 79, 886, 102)
+        self.time_left_bounds = (162, 145, 850, 170) # OMEN (85, 79, 886, 102)
 
         # bounds for level completion message
-        self.lvlComplete_msgBounds = (392, 199, 566, 213)
+        self.lvlComplete_msgBounds = (363, 240, 595, 260) # OMEN (392, 199, 566, 213)
 
         # threshold for end level message detection
         self.lvlComplete_msgThresh = 0.80
@@ -70,6 +70,11 @@ class N_Game_Env(gym.Env):
                                                    self.observation_width,
                                                    self.observation_channels),
                                             dtype=np.uint8)
+        # for navigating menus
+        self.down_arrowcode = 0x28
+
+        self.lvl_initialTime = None
+
         self.prev_stepTime = None
 
     def reset(self):
@@ -96,7 +101,10 @@ class N_Game_Env(gym.Env):
 
         self.prev_stepTime = self.lvl_initialTime
 
-        return observation
+        # for later versions of gym default behavior is to return obs and info
+        info = {}
+
+        return observation, info
 
     def step(self, action):
         action_key = self.action_lookup[action]
@@ -161,8 +169,9 @@ class N_Game_Env(gym.Env):
         if reward < 0:
             reward = 0
 
+        truncation = 0
         info = {}
-        return observation, reward, done, info
+        return observation, reward, done, truncation, info
 
     def screen_capture(self):
 
@@ -264,9 +273,7 @@ class N_Game_Env(gym.Env):
         # close the game window
         win32gui.PostMessage(self.gameWindow_handle, win32con.WM_CLOSE, 0, 0)
 
-    def start_game(self, game_path: str ='D:\\Nv2-PC.exe'):
-
-        down_arrow_code = 0x28
+    def start_game(self, game_path: str ='D:\\VideoGame_AI\\N_game\\Nv2-PC.exe'):
 
         window_w = 967
         window_h = 844
@@ -275,8 +282,8 @@ class N_Game_Env(gym.Env):
         window_y = 0
 
         # view menu position for first screen
-        screen_viewX = 72
-        screen_viewY = 51
+        screen_viewX = 54 # OMEN 72
+        screen_viewY = 35 # OMEN 51
 
         os.startfile(game_path)
 
@@ -299,18 +306,16 @@ class N_Game_Env(gym.Env):
         new_hwnd = win32gui.FindWindow(None, 'NGame')
 
         # click on screen to show all. That way window can be smaller
-        pyautogui.click(screen_viewX, screen_viewY)
-        time.sleep(.25)
-        pyautogui.click(screen_viewX, screen_viewY + 50)
+        # REDUNDANT
+        #pyautogui.click(screen_viewX, screen_viewY)
+        #time.sleep(.25)
+        #pyautogui.click(screen_viewX, screen_viewY + 50)
 
         # highlights play game
-        win32gui.SendMessage(new_hwnd, win32con.WM_KEYDOWN, down_arrow_code, 0)
-        time.sleep(.05)
-        win32gui.SendMessage(new_hwnd, win32con.WM_KEYUP, down_arrow_code, 0)
-
-        win32gui.SendMessage(new_hwnd, win32con.WM_KEYDOWN, down_arrow_code, 0)
-        time.sleep(.05)
-        win32gui.SendMessage(new_hwnd, win32con.WM_KEYUP, down_arrow_code, 0)
+        for i in range(2):
+            win32gui.SendMessage(new_hwnd, win32con.WM_KEYDOWN, self.down_arrowcode, 0)
+            time.sleep(.05)
+            win32gui.SendMessage(new_hwnd, win32con.WM_KEYUP, self.down_arrowcode, 0)
 
         # selects play game
         win32gui.SendMessage(new_hwnd, win32con.WM_KEYDOWN,
@@ -351,16 +356,23 @@ class N_Game_Env(gym.Env):
         win32gui.SendMessage(self.gameWindow_handle, win32con.WM_KEYUP,
                              0x1B, 0)
 
-        pyautogui.click(826,346)
-        time.sleep(0.05)
-        pyautogui.click(62, 225)
+        # press down key twice to highlight play game
+        for i in range(2):
+            win32gui.SendMessage(self.gameWindow_handle, win32con.WM_KEYDOWN, self.down_arrowcode, 0)
+            time.sleep(.05)
+            win32gui.SendMessage(self.gameWindow_handle, win32con.WM_KEYUP, self.down_arrowcode, 0)
 
-        # press Z to continue
-        win32gui.SendMessage(self.gameWindow_handle, win32con.WM_KEYDOWN,
-                             self.action_lookup[2], 0)
-        time.sleep(0.05)
-        win32gui.SendMessage(self.gameWindow_handle, win32con.WM_KEYUP,
-                             self.action_lookup[2], 0)
+        #pyautogui.click(826, 346)
+        #time.sleep(0.05)
+        #pyautogui.click(62, 225)
+
+        for i in range(2):
+            # press Z twice to continue
+            win32gui.SendMessage(self.gameWindow_handle, win32con.WM_KEYDOWN,
+                                 self.action_lookup[2], 0)
+            time.sleep(0.05)
+            win32gui.SendMessage(self.gameWindow_handle, win32con.WM_KEYUP,
+                                 self.action_lookup[2], 0)
 
         # moves mouse off screen
         pyautogui.click(1542, 185)
