@@ -85,7 +85,7 @@ class Agent:
             action = int(act_v.item())
 
         # do step in the environment
-        new_state, reward, is_done, truncation, _ = self.env.step(action)
+        new_state, reward, is_done, truncation, info = self.env.step(action)
 
         self.total_reward += reward
 

@@ -23,7 +23,7 @@ import mss
 import mss.tools
 
 # need to include in script for pytesseract to work
-pytesseract.pytesseract.tesseract_cmd = 'D:\\VideoGame_AI\\third_party\\Tesseract-OCR\\tesseract.exe'
+pytesseract.pytesseract.tesseract_cmd = 'D:\\VideoGame_AI\\N_game\\third_party\\Tesseract-OCR\\tesseract.exe'
 
 keyboard = Controller()
 
