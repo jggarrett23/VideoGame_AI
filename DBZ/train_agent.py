@@ -18,7 +18,7 @@ from torch import Tensor, nn, optim
 from torch.utils.tensorboard import SummaryWriter
 
 from Custom_DBZ_Game import DBZ_Env
-from models import ViT, PreTrained_DeiTModel, cnn_fc
+from models import ViT, PreTrained_DeiTModel, cnn_fc, dueling_cnn
 
 
 # ---------------------------------------------------------------------------
@@ -99,6 +99,7 @@ class ReplayMemory:
 
 MODEL_REGISTRY: dict[str, type[nn.Module]] = {
     "cnn_fc": cnn_fc,
+    "dueling_cnn": dueling_cnn,
     "vit": ViT,
     "pretrained_deit": PreTrained_DeiTModel,
 }
@@ -227,7 +228,7 @@ if __name__ == "__main__":
 
     cfg = TrainConfig()
     exp = ExperimentConfig(
-        model_name="cnn_fc",
+        model_name="dueling_cnn",
         load_checkpoint=False,
         save_data=False,
     )
