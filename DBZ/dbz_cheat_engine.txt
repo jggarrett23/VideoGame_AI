@@ -1,0 +1,42 @@
+Starting opp health (starts at 50000 on easy mode)
+	base address: "pcsx2.exe"+01243988
+	offset: 6A4
+
+Player health (starts at 39570 on very hard mode)
+	
+	base address: "pcsx2.exe"+01243984
+	offset: A4
+
+# restart when either of these fall to 1
+# mark as end of "episode"
+
+Starting time: 240 (infinite 65535)
+	base address: "pcsx2.exe"+012439A8
+	offset: 534
+
+Player starting Ki: 40000 (max 100000)
+	base address: "pcsx2.exe"+01243984
+	offset: B0
+
+Oppenent Ki: 
+	base address: "pcsx2.exe"+01243988
+	offset: 6B0
+
+Start:
+	base address: "pcsx2.exe"+012439A8
+	offset: 2C8
+
+# min ki is 2360
+
+Enemy total attack damage:
+	base address: "pcsx2.exe"+012439A0
+	offset: C9C
+
+
+Detect if attack is about to occur
+	"pcsx2.exe"+1199F30
+	
+
+Player/Opp distance:
+	base address: "pcsx2.exe"+0124398C
+	offset: 464
