@@ -4,7 +4,7 @@ import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
 import pymem
-from utils import capture_screen, press_key, press_controller_button
+from utils import capture_screen, press_key, press_controller_button, navigate_to_fight, load_menu_templates, match_menu_template
 import sched
 import time
 import win32ui, win32gui, win32process
@@ -21,16 +21,19 @@ matplotlib.use('TkAgg')
 key_releaseBuffer = 0.5
 
 scheduler = sched.scheduler(time.time, time.sleep)
-reader = easyocr.Reader(['en'])
+# reader moved to DBZ_Env.__init__ so each instance owns its own EasyOCR model (thread-safe for multi-env)
 
 
 class DBZ_Env(gym.Env):
     metadata = {'render.modes': ['human']}
 
-    def __init__(self, game_window_title=None, observation_size=128, observation_buffer_size=4,
-                 health_threshold=500, full_health=40000):
-        super(DBZ_Env, self).__init__()
+    PCSX2_EXE = r'D:\PCSX2 1.6.0\pcsx2.exe'
+    ISO_PATH  = r'D:\PCSX2 1.6.0\Dragon Ball Z - Budokai Tenkaichi 3 (USA) (En,Ja).iso'
+    MENU_TEMPLATES_DIR = r'D:\VideoGame_AI\DBZ\menu_screenshots'
 
+    def __init__(self, game_window_title=None, observation_size=128, observation_buffer_size=4,
+                 health_threshold=500, full_health=40000, navigate=True, env_idx: int = 0):
+        super(DBZ_Env, self).__init__()
 
         # create virtual xbox controller
         self.gamepad = vg.VX360Gamepad()
@@ -98,11 +101,23 @@ class DBZ_Env(gym.Env):
 
         self.game_window_title = game_window_title
         self.game_window_handle = None
+        self.env_idx = env_idx
+
+        self.reader = easyocr.Reader(['en'])
 
         # read memory for reset signals
         self.pm = pymem.Pymem()  # Instantiate pymem without arguments
         self.memory_addresses = {}
+
         self.hook_memory_codes()
+
+        if navigate:
+            menu_templates = load_menu_templates(self.MENU_TEMPLATES_DIR)
+            frame = capture_screen(self.game_window_handle, bound_deltas=self.capture_bounds)
+            tpl, _ = match_menu_template(frame, menu_templates)
+            if tpl is not None:
+                navigate_to_fight(self.gamepad, self.action_lookup, self.game_window_handle,
+                                  menu_templates, capture_bounds=self.capture_bounds)
 
         self.player_health = self.pm.read_int(self.memory_addresses['player_health'])
         self.opp_health = self.pm.read_int(self.memory_addresses['opponent_health'])
@@ -121,7 +136,12 @@ class DBZ_Env(gym.Env):
         self.player_dist_threshold = 1131883873
 
     def hook_memory_codes(self):
-        self.game_window_handle = win32gui.FindWindow(None, self.game_window_title)
+        matches = []
+        win32gui.EnumWindows(
+            lambda hwnd, _: matches.append(hwnd) if win32gui.GetWindowText(hwnd) == self.game_window_title else None,
+            None
+        )
+        self.game_window_handle = matches[self.env_idx]
         _, pid = win32process.GetWindowThreadProcessId(self.game_window_handle)
 
         if pid:
@@ -190,8 +210,8 @@ class DBZ_Env(gym.Env):
 
         health_reward = True
         special_attack_reward = True
-        block_reward = True
-        attack_dist_reward = True
+        block_reward = False      # disabled: opp_attack_address is unreliable
+        attack_dist_reward = False  # disabled: player_dist_threshold int/float mismatch unverified
         ki_reward = True
 
         current_player_health = self.pm.read_int(self.memory_addresses['player_health'])
@@ -199,12 +219,11 @@ class DBZ_Env(gym.Env):
 
         current_player_ki = self.pm.read_int(self.memory_addresses['player_ki'])
 
-        # calculate percentage change in health
-        current_player_health_pc = (current_player_health - self.player_health) / self.player_health
-        opp_player_health_pc = (current_opp_health - self.opp_health) / self.opp_health
-
         if health_reward:
-            reward = current_player_health_pc - opp_player_health_pc
+            # scale by full_health so a 2000 HP hit yields ~0.25 reward
+            opp_damage    = max(0, self.opp_health    - current_opp_health)    / self.full_health
+            player_damage = max(0, self.player_health - current_player_health) / self.full_health
+            reward = 5.0 * (opp_damage - player_damage)
 
         if ki_reward:
             # reward ki generation
@@ -219,9 +238,10 @@ class DBZ_Env(gym.Env):
             # if action was a special but not enough ki, penalize
             if current_player_ki < self.special_attack_ki_thresh:
                 if action_key in ['Combo_6', 'Combo_7', 'Combo_8']:
-                        reward -= 0.2
-                else:
-                    reward += 0.2
+                    reward -= 0.2
+                # else:
+                #     reward += 0.2  # disabled: fires on nearly every step (ki starts at 0),
+                #                    # drowning out the health differential signal
 
             if action_key == 'Combo_9' and current_player_ki < 2*self.special_attack_ki_thresh:
                 reward -= 0.3
@@ -242,6 +262,9 @@ class DBZ_Env(gym.Env):
             player_opp_dist = self.pm.read_int(self.memory_addresses['player_opp_dist_address'])
             if action_key in ['X', 'Combo_1', 'Combo_2', 'Combo_3', 'Combo_4'] and player_opp_dist >= self.player_dist_threshold:
                 reward -= 0.3
+
+        # small step penalty to discourage passivity
+        reward -= 0.005
 
         # clamp reward values
         if reward >= 1:
@@ -273,7 +296,7 @@ class DBZ_Env(gym.Env):
             screen = capture_screen(self.game_window_handle, bound_deltas=self.capture_bounds)
             fight_again_crop = screen[200:250, 300:475]
             fight_again_crop = cv2.cvtColor(fight_again_crop, cv2.COLOR_BGR2GRAY)
-            bbox, text, confidence = reader.readtext(fight_again_crop)[0]
+            bbox, text, confidence = self.reader.readtext(fight_again_crop)[0]
             if text == 'Fight Again' and confidence > .80:
                 press_controller_button(self.gamepad, self.action_lookup['A'], 0.1)
         else:
