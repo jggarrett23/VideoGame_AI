@@ -3,6 +3,7 @@ param(
     [int]$Episodes           = 150,
     [float]$Lr               = 1e-3,
     [int]$BatchSize          = 16,
+    [int]$NumEnvs            = 1,
     [switch]$LoadCheckpoint,
     [switch]$SaveData
 )
@@ -17,14 +18,14 @@ Write-Host "Activating the virtual environment..."
 
 # Launch PCSX2 and wait for it to reach a playable state
 Write-Host "Launching game via MCP server..."
-python "$PSScriptRoot\launch_game.py"
+python "$PSScriptRoot\launch_game.py" --num-envs $NumEnvs
 if ($LASTEXITCODE -ne 0) {
     Write-Host "Game launch failed. Aborting."
     exit 1
 }
 
 # Build argument list
-$trainArgs = @("$pythonScript", "--model", $Model, "--episodes", $Episodes, "--lr", $Lr, "--batch-size", $BatchSize)
+$trainArgs = @("$pythonScript", "--model", $Model, "--episodes", $Episodes, "--lr", $Lr, "--batch-size", $BatchSize, "--num-envs", $NumEnvs)
 if ($LoadCheckpoint) { $trainArgs += "--load-checkpoint" }
 if ($SaveData)       { $trainArgs += "--save-data" }
 

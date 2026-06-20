@@ -131,23 +131,43 @@ def press_controller_button(gamepad, buttons, hold_time=0.1):
     gamepad.update()
 
 
+def _enum_windows_with_title(title: str) -> list[int]:
+    """Return handles of all visible windows matching title."""
+    matches: list[int] = []
+    win32gui.EnumWindows(
+        lambda hwnd, _: matches.append(hwnd) if win32gui.GetWindowText(hwnd) == title else None,
+        None,
+    )
+    return matches
+
+
 def launch_pcsx2(pcsx2_exe: str, iso_path: str, window_title: str = 'Slot: 0',
-                 timeout: int = 120) -> int:
-    """Launch PCSX2 if not already running and return the window handle."""
-    hwnd = win32gui.FindWindow(None, window_title)
-    if hwnd:
-        return hwnd
+                 timeout: int = 120, num_instances: int = 1) -> list[int]:
+    """Launch PCSX2 until num_instances windows with window_title exist.
 
-    subprocess.Popen([pcsx2_exe, iso_path])
+    Returns a list of window handles (one per instance), in the order they appeared.
+    Already-running instances count toward the target.
+    """
+    existing = _enum_windows_with_title(window_title)
+    handles  = list(existing)
 
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        hwnd = win32gui.FindWindow(None, window_title)
-        if hwnd:
-            return hwnd
-        time.sleep(2)
+    while len(handles) < num_instances:
+        subprocess.Popen([pcsx2_exe, iso_path])
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            current = _enum_windows_with_title(window_title)
+            new = [h for h in current if h not in handles]
+            if new:
+                handles.extend(new)
+                break
+            time.sleep(2)
+        else:
+            raise TimeoutError(
+                f'PCSX2 window "{window_title}" did not appear within {timeout}s '
+                f'(have {len(handles)}/{num_instances})'
+            )
 
-    raise TimeoutError(f'PCSX2 window "{window_title}" did not appear within {timeout}s')
+    return handles[:num_instances]
 
 
 def wait_for_game_load(pm: pymem.Pymem, base_health_ptr_addr: int, timeout: int = 200,

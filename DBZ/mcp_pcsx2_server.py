@@ -40,12 +40,12 @@ def _require_connection() -> Optional[str]:
 
 
 @mcp.tool()
-def launch_game() -> str:
-    """Launch PCSX2 with DBZ if not already running. Returns when the emulator window appears."""
+def launch_game(num_envs: int = 1) -> str:
+    """Launch PCSX2 with DBZ. Starts num_envs instances if not already running."""
     try:
-        hwnd = launch_pcsx2(PCSX2_EXE, ISO_PATH, WINDOW_TITLE)
-        session.hwnd = hwnd
-        return f"PCSX2 launched. Window handle: {hwnd}"
+        handles = launch_pcsx2(PCSX2_EXE, ISO_PATH, WINDOW_TITLE, num_instances=num_envs)
+        session.hwnd = handles[0]
+        return f"PCSX2 launched. {len(handles)} instance(s). Handles: {handles}"
     except TimeoutError as e:
         return f"Error: {e}"
     except Exception as e:
