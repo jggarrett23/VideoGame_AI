@@ -4,7 +4,7 @@ import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
 import pymem
-from utils import capture_screen, press_key, press_controller_button
+from utils import capture_screen, press_key, press_controller_button, navigate_to_fight, load_menu_templates, match_menu_template
 import sched
 import time
 import win32ui, win32gui, win32process
@@ -27,10 +27,13 @@ reader = easyocr.Reader(['en'])
 class DBZ_Env(gym.Env):
     metadata = {'render.modes': ['human']}
 
-    def __init__(self, game_window_title=None, observation_size=128, observation_buffer_size=4,
-                 health_threshold=500, full_health=40000):
-        super(DBZ_Env, self).__init__()
+    PCSX2_EXE = r'D:\PCSX2 1.6.0\pcsx2.exe'
+    ISO_PATH  = r'D:\PCSX2 1.6.0\Dragon Ball Z - Budokai Tenkaichi 3 (USA) (En,Ja).iso'
+    MENU_TEMPLATES_DIR = r'D:\VideoGame_AI\DBZ\menu_screenshots'
 
+    def __init__(self, game_window_title=None, observation_size=128, observation_buffer_size=4,
+                 health_threshold=500, full_health=40000, navigate=True):
+        super(DBZ_Env, self).__init__()
 
         # create virtual xbox controller
         self.gamepad = vg.VX360Gamepad()
@@ -102,7 +105,16 @@ class DBZ_Env(gym.Env):
         # read memory for reset signals
         self.pm = pymem.Pymem()  # Instantiate pymem without arguments
         self.memory_addresses = {}
+
         self.hook_memory_codes()
+
+        if navigate:
+            menu_templates = load_menu_templates(self.MENU_TEMPLATES_DIR)
+            frame = capture_screen(self.game_window_handle, bound_deltas=self.capture_bounds)
+            tpl, _ = match_menu_template(frame, menu_templates)
+            if tpl is not None:
+                navigate_to_fight(self.gamepad, self.action_lookup, self.game_window_handle,
+                                  menu_templates, capture_bounds=self.capture_bounds)
 
         self.player_health = self.pm.read_int(self.memory_addresses['player_health'])
         self.opp_health = self.pm.read_int(self.memory_addresses['opponent_health'])

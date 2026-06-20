@@ -194,3 +194,69 @@ class cnn_fc(nn.Module):
         action_logits = self.fc(cnn_out)
         duration_preds = torch.clamp(self.duration_fc(cnn_out), min=0.1, max=6)
         return action_logits, duration_preds
+
+
+class dueling_cnn(nn.Module):
+    """Dueling DQN (Wang et al. 2016) with stride-based CNN reduction.
+
+    Compared to cnn_fc: stride/kernel sizes follow the Nature DQN paper, cutting
+    the flattened feature vector from ~1.9M to ~9K, and the FC head is split into
+    separate value and advantage streams so the network can learn state value
+    independently of per-action advantage.
+    """
+
+    def __init__(self, in_channels: int = 4, img_shape: tuple = (128, 128), num_classes: int = 18):
+        super().__init__()
+        self.img_shape = img_shape
+        self.in_channels = in_channels
+
+        self.cnn = nn.Sequential(
+            nn.Conv2d(in_channels, 32, kernel_size=8, stride=4),
+            nn.ReLU(),
+            nn.Conv2d(32, 64, kernel_size=4, stride=2),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=3, stride=1),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Flatten(),
+        )
+        conv_out_size = self._get_conv_out().shape[-1]
+
+        self.shared_fc = nn.Sequential(
+            nn.Linear(conv_out_size, 512),
+            nn.ReLU(),
+        )
+
+        # Value stream: estimates V(s)
+        self.value_stream = nn.Sequential(
+            nn.Linear(512, 256),
+            nn.ReLU(),
+            nn.Linear(256, 1),
+        )
+
+        # Advantage stream: estimates A(s, a) for each action
+        self.advantage_stream = nn.Sequential(
+            nn.Linear(512, 256),
+            nn.ReLU(),
+            nn.Linear(256, num_classes),
+        )
+
+        # Key-press duration head
+        self.duration_fc = nn.Linear(512, 1)
+
+    def _get_conv_out(self) -> Tensor:
+        X = torch.zeros(1, self.in_channels, self.img_shape[0], self.img_shape[1])
+        return self.cnn(X)
+
+    def forward(self, X: Tensor) -> tuple[Tensor, Tensor]:
+        if self.training:
+            X = X + torch.randn(X.size(), device=X.device)
+        features = self.shared_fc(self.cnn(X))
+
+        value = self.value_stream(features)                          # (B, 1)
+        advantage = self.advantage_stream(features)                  # (B, num_classes)
+        # Q(s,a) = V(s) + A(s,a) - mean_a[A(s,a)]
+        q_values = value + advantage - advantage.mean(dim=1, keepdim=True)
+
+        duration = torch.clamp(self.duration_fc(features), min=0.1, max=6)
+        return q_values, duration

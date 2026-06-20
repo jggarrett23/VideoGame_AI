@@ -31,6 +31,15 @@ python offline_training.py
 
 ## Architecture
 
+## Launch game
+`DBZ_Env` launches PCSX2, waits for the game to load, and navigates to the fight screen automatically when `auto_launch=True` (the default). No manual steps are needed — just run `.\run_train_agent.ps1`.
+
+For manual/debug launches, the emulator can be started with:
+```
+'D:\PCSX2 1.6.0\pcsx2.exe' --nogui "D:\PCSX2 1.6.0\Dragon Ball Z - Budokai Tenkaichi 3 (USA) (En,Ja).iso"
+```
+Then pass `auto_launch=False` to `DBZ_Env` and navigate manually (Space → v → i×3 → v×3 → v×7, which maps to Start → Cross → D-Pad Down×3 → Cross×3 → Cross×7 on the gamepad).
+
 ### Environment (`gym_DBZ/envs/Custom_DBZ_Game.py`)
 Wraps the live game as an OpenAI Gymnasium environment:
 - **Observation**: 4-frame stacked grayscale images `(4, 128, 128)`, resized from PCSX2 window capture, normalized to `[0,1]`. Frame skip: every 4th frame is added to the buffer.

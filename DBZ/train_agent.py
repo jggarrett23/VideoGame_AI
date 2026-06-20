@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import math
 import random
+import sys
 import time
 from collections import deque
 from datetime import datetime
@@ -18,7 +20,7 @@ from torch import Tensor, nn, optim
 from torch.utils.tensorboard import SummaryWriter
 
 from Custom_DBZ_Game import DBZ_Env
-from models import ViT, PreTrained_DeiTModel, cnn_fc
+from models import ViT, PreTrained_DeiTModel, cnn_fc, dueling_cnn
 
 
 # ---------------------------------------------------------------------------
@@ -99,6 +101,7 @@ class ReplayMemory:
 
 MODEL_REGISTRY: dict[str, type[nn.Module]] = {
     "cnn_fc": cnn_fc,
+    "dueling_cnn": dueling_cnn,
     "vit": ViT,
     "pretrained_deit": PreTrained_DeiTModel,
 }
@@ -223,13 +226,44 @@ def append_to_h5_file(path: Path, t: Transition) -> None:
 # Main
 # ---------------------------------------------------------------------------
 
+class _Tee:
+    """Mirrors writes to two file-like objects (e.g. stdout + a log file)."""
+    def __init__(self, *files):
+        self._files = files
+
+    def write(self, data: str) -> None:
+        for f in self._files:
+            f.write(data)
+            f.flush()
+
+    def flush(self) -> None:
+        for f in self._files:
+            f.flush()
+
+
 if __name__ == "__main__":
 
-    cfg = TrainConfig()
+    parser = argparse.ArgumentParser(description="Train DBZ DQN agent")
+    parser.add_argument("--model",           type=str,   default="dueling_cnn",
+                        choices=list(MODEL_REGISTRY.keys()),
+                        help="Model architecture to train")
+    parser.add_argument("--episodes",        type=int,   default=5,
+                        help="Number of training episodes")
+    parser.add_argument("--lr",              type=float, default=1e-3,
+                        help="Learning rate")
+    parser.add_argument("--batch-size",      type=int,   default=16,
+                        help="Replay buffer batch size")
+    parser.add_argument("--load-checkpoint", action="store_true",
+                        help="Resume from saved checkpoint")
+    parser.add_argument("--save-data",       action="store_true",
+                        help="Save gameplay transitions to HDF5")
+    args = parser.parse_args()
+
+    cfg = TrainConfig(num_episodes=args.episodes, lr=args.lr, batch_size=args.batch_size)
     exp = ExperimentConfig(
-        model_name="cnn_fc",
-        load_checkpoint=False,
-        save_data=False,
+        model_name=args.model,
+        load_checkpoint=args.load_checkpoint,
+        save_data=args.save_data,
     )
 
     # --- paths ---------------------------------------------------------------
@@ -239,6 +273,10 @@ if __name__ == "__main__":
     results_path    = model_dir / "results.json"
     log_dir         = Path("log") / exp.model_name / datetime.now().strftime("%Y%m%d-%H%M%S")
     model_dir.mkdir(parents=True, exist_ok=True)
+
+    log_file_path = model_dir / f"{exp.model_name}.logs"
+    _log_fh = open(log_file_path, "a")
+    sys.stdout = _Tee(sys.__stdout__, _log_fh)
 
     (model_dir / "config.json").write_text(cfg.model_dump_json(indent=2))
 
@@ -397,3 +435,7 @@ if __name__ == "__main__":
 
     print(f"\nTraining complete. Duration: {(time.time() - training_start) / 60:.1f} minutes")
     print(results.model_dump_json(indent=2))
+
+    sys.stdout = sys.__stdout__
+    _log_fh.close()
+    print(f"Log written to {log_file_path}")
