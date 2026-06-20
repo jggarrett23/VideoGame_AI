@@ -526,7 +526,7 @@ if __name__ == "__main__":
         model_name=exp.model_name,
         avg_reward_last_20ep=sum(all_episode_rewards[-20:]) / min(len(all_episode_rewards), 20),
         peak_reward=max(all_episode_rewards),
-        num_train_hyperparameters=len(cfg.model_fields),
+        num_train_hyperparameters=len(type(cfg).model_fields),
         wall_time_per_episode_sec=total_wall_time / max(ep_cnt, 1),
         vram_peak_gb=vram_peak_gb,
         num_params_million=num_params_M,
