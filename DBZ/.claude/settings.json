@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "pcsx2": {
+      "command": "D:\\VideoGame_AI\\DBZ\\venv\\Scripts\\python.exe",
+      "args": ["-u", "D:\\VideoGame_AI\\DBZ\\mcp_pcsx2_server.py"],
+      "env": {}
+    }
+  }
+}
