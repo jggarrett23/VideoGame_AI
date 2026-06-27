@@ -4,7 +4,7 @@ import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
 import pymem
-from utils import capture_screen, press_key, press_controller_button, navigate_to_fight, load_menu_templates, match_menu_template
+from utils import capture_screen, press_key, press_controller_button, navigate_to_fight_memory
 import sched
 import time
 import win32ui, win32gui, win32process
@@ -32,7 +32,7 @@ class DBZ_Env(gym.Env):
     MENU_TEMPLATES_DIR = r'D:\VideoGame_AI\DBZ\menu_screenshots'
 
     def __init__(self, game_window_title=None, observation_size=128, observation_buffer_size=4,
-                 health_threshold=500, full_health=40000, navigate=True, env_idx: int = 0):
+                 health_threshold=100, full_health=40000, navigate=True, env_idx: int = 0):
         super(DBZ_Env, self).__init__()
 
         # create virtual xbox controller
@@ -112,12 +112,10 @@ class DBZ_Env(gym.Env):
         self.hook_memory_codes()
 
         if navigate:
-            menu_templates = load_menu_templates(self.MENU_TEMPLATES_DIR)
-            frame = capture_screen(self.game_window_handle, bound_deltas=self.capture_bounds)
-            tpl, _ = match_menu_template(frame, menu_templates)
-            if tpl is not None:
-                navigate_to_fight(self.gamepad, self.action_lookup, self.game_window_handle,
-                                  menu_templates, capture_bounds=self.capture_bounds)
+            navigate_to_fight_memory(
+                self.pm, self.memory_addresses,
+                self.gamepad, self.action_lookup,
+            )
 
         self.player_health = self.pm.read_int(self.memory_addresses['player_health'])
         self.opp_health = self.pm.read_int(self.memory_addresses['opponent_health'])
@@ -181,6 +179,37 @@ class DBZ_Env(gym.Env):
                 player_dist_address = self.pm.read_int(player_dist_address) + 0x464
                 self.memory_addresses['player_opp_dist_address'] = player_dist_address
 
+                # Start Game Menu
+                # address = 14 when at menu screen, 2147483648 when trailer running, 2218774995 when memory loading, 2081454128 if space not pressed fast enough at menu
+                start_game_screen = base_address + 0x123F2B8
+                start_game_screen = self.pm.read_int(start_game_screen) + 0x1C8
+                self.memory_addresses['start_game_screen'] = start_game_screen
+
+                # Continue game (continue = 1065353216)
+                continue_game = base_address + 0x0124072C
+                continue_game = self.pm.read_int(continue_game) + 0xAE4
+                self.memory_addresses['continue_game'] = continue_game
+
+                # Menu navigation
+                # Duel option = 144
+                menu_options = base_address + 0x011EA1D4
+                menu_options = self.pm.read_int(menu_options) + 0xB54
+                self.memory_addresses['menu_options'] = menu_options
+
+                fight_pause_menu = base_address + 0x00752408
+                fight_pause_menu = self.pm.read_int(fight_pause_menu) + 0x178
+                
+                # 1 = continue battle 2 = view skills 3 = return to character select 4 = return to main menu
+                self.memory_addresses['fight_pause_menu'] = fight_pause_menu
+
+                end_fight_menu = base_address + 0x0123F284
+                for code in [0x570, 0x6B4, 0xFE4]:
+                    end_fight_menu = self.pm.read_int(end_fight_menu) + code
+
+                # 1 = fight again 2 = return to character select 3 = return to vs 4 = return to main menu
+                self.memory_addresses['fight_again'] = end_fight_menu
+
+                
             except pymem.exception.ProcessNotFound:
                 print(f"Process with PID {pid} not found.")
             except Exception as e:
@@ -292,13 +321,9 @@ class DBZ_Env(gym.Env):
     def reset(self, seed=0, options=None):
 
         # check if start window is open for "Fight again option
-        if self.pm.read_int(self.memory_addresses['start']):
-            screen = capture_screen(self.game_window_handle, bound_deltas=self.capture_bounds)
-            fight_again_crop = screen[200:250, 300:475]
-            fight_again_crop = cv2.cvtColor(fight_again_crop, cv2.COLOR_BGR2GRAY)
-            bbox, text, confidence = self.reader.readtext(fight_again_crop)[0]
-            if text == 'Fight Again' and confidence > .80:
-                press_controller_button(self.gamepad, self.action_lookup['A'], 0.1)
+        if self.pm.read_int(self.memory_addresses['start']) and self.pm.read_int(self.memory_addresses['fight_again'] == 1):
+            press_controller_button(gamepad, self.action_keys['A'])
+            time.sleep(0.1)
         else:
             self.pm.write_int(self.memory_addresses['player_health'], self.full_health)
             self.pm.write_int(self.memory_addresses['opponent_health'], self.full_health)
@@ -307,6 +332,8 @@ class DBZ_Env(gym.Env):
         self.observation_buffer = np.zeros(
             (self.observation_buffer_size, self.observation_height, self.observation_width),
             dtype=np.float32)
+
+        self.frame_cnt = 0
 
         # concatenate first screen shot to observation buffer
         self.sample_n_process_screen()
@@ -338,7 +365,7 @@ class DBZ_Env(gym.Env):
         info = {}
         return self.observation_buffer, reward, done, truncation, info
 
-    def render(self):
+    def render(self) -> None:
         pass
 
 

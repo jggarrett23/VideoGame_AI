@@ -10,7 +10,7 @@ import pymem
 import pymem.process
 import win32gui
 import win32process
-
+from Custom_DBZ_Game import DBZ_Env
 from utils import _enum_windows_with_title
 
 WINDOW_TITLE = 'Slot: 0'
@@ -32,6 +32,7 @@ def _is_instance_playable(hwnd: int) -> bool:
         return 0 < health <= FULL_HEALTH
     except Exception:
         return False
+    
 
 
 def wait_for_playable_state(num_envs: int = 1, window_title: str = WINDOW_TITLE,
@@ -59,6 +60,7 @@ def main() -> None:
     result = launch_game(num_envs=args.num_envs)
     print(result)
 
+    """
     print("Waiting for all instances to reach a playable state...")
     if wait_for_playable_state(num_envs=args.num_envs):
         print(f"All {args.num_envs} instance(s) ready. You can now run train_agent.py.")
@@ -66,7 +68,7 @@ def main() -> None:
         print(f"ERROR: not all instances reached a playable state within {POLL_TIMEOUT}s.",
               file=sys.stderr)
         sys.exit(1)
-
+    """
 
 if __name__ == "__main__":
     main()

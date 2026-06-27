@@ -1,9 +1,9 @@
 param(
     [string]$Model           = "dueling_cnn",
-    [int]$Episodes           = 150,
+    [int]$Episodes           = 10,
     [float]$Lr               = 1e-3,
-    [int]$BatchSize          = 16,
-    [int]$NumEnvs            = 1,
+    [int]$BatchSize          = 32,
+    [int]$NumEnvs            = 2,
     [switch]$LoadCheckpoint,
     [switch]$SaveData
 )
@@ -42,8 +42,8 @@ try {
     Write-Output "Elapsed time: $($elapsedTime.TotalHours) hours"
 
     # wait 5 minutes before sleeping
-    Start-Sleep -Seconds 300
+    #Start-Sleep -Seconds 300
 
     Write-Host "Putting the computer to sleep..."
-    rundll32.exe powrprof.dll,SetSuspendState Sleep
+    #rundll32.exe powrprof.dll,SetSuspendState Sleep
 }

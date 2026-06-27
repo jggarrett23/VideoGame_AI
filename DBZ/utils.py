@@ -236,6 +236,81 @@ def match_menu_template(frame: np.ndarray, templates: list, threshold: float = 0
     return best, best_score
 
 
+def navigate_to_fight_memory(
+    pm: pymem.Pymem,
+    memory_addresses: dict,
+    gamepad: vgamepad.VX360Gamepad,
+    action_lookup: dict,
+    timeout: float = 180,
+) -> None:
+    """Navigate DBZ menus to the fight screen using memory address polling.
+
+    Replaces CV template matching. Polls start_game_screen, continue_game, and
+    menu_options addresses (resolved in hook_memory_codes) to gate each button press.
+    """
+    _START_LOADING = 2218774995  # memory loading — wait, don't press
+    _START_TRAILER = 2147483648  # trailer running — press Start to skip
+    _START_MENU    = 14          # title screen ready
+
+    start_btn = vgamepad.XUSB_BUTTON.XUSB_GAMEPAD_START
+    cross_btn = action_lookup['A']
+    down_btn  = action_lookup['Dpad_Down']
+    deadline  = time.time() + timeout
+
+    # Phase 1: poll start_game_screen until title screen (14).
+    # Print value when it matches known intermediate states.
+    print("navigate: waiting for title screen (start_game_screen == 14)...")
+    while pm.read_int(memory_addresses['start_game_screen']) != 14:
+        
+        press_controller_button(gamepad, (start_btn,), 0.1)
+        time.sleep(0.3)
+
+    time.sleep(2.0)
+    press_controller_button(gamepad, (start_btn,), 0.1)
+    time.sleep(0.3)
+
+    # Phase 2: press Start once to enter main menu
+    print("navigate: entering main menu...")
+    press_controller_button(gamepad, (start_btn,), 0.1)
+    time.sleep(1.5)
+
+    # Phase 3: press Down until continue_game == 1065353216, then press Cross
+    print("navigate: navigating to Continue...")
+    while pm.read_int(memory_addresses['continue_game']) != 0:
+        press_controller_button(gamepad, down_btn, 0.1)
+        time.sleep(0.1)
+
+    press_controller_button(gamepad, cross_btn, 0.1)
+    time.sleep(3.0)
+    
+    # Phase 4: press Down until menu_options == 144 (Duel highlighted), then press Cross
+    print("navigate: navigating to Duel...")
+    for _ in range(3):
+        press_controller_button(gamepad, down_btn, 0.1)
+        time.sleep(2.0)
+    
+    press_controller_button(gamepad, cross_btn, 0.1)
+    time.sleep(3.0)
+
+    # Phase 5: advance through versus setup and character select
+    for _ in range(9):
+        press_controller_button(gamepad, cross_btn, 0.1)
+        time.sleep(3.5)
+
+    time.sleep(2.0)
+     
+    # advance to fight start. first skip past intro, then pause game
+    while pm.read_int(memory_addresses['fight_pause_menu']) != 1:
+        press_controller_button(gamepad, start_btn, 0.1)
+        time.sleep(0.5)
+
+    print("navigate: done.")
+    
+    # continue battle
+    press_controller_button(gamepad, cross_btn, 0.1)
+    time.sleep(0.1)
+
+
 def navigate_to_fight(gamepad: vgamepad.VX360Gamepad, action_lookup: dict, hwnd: int,
                       templates: list, capture_bounds=(40, 20, 15, 15),
                       threshold: float = 0.90, timeout: float = 120,

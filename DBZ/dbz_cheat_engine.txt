@@ -40,3 +40,16 @@ Detect if attack is about to occur
 Player/Opp distance:
 	base address: "pcsx2.exe"+0124398C
 	offset: 464
+
+Start Game (value = 14 when at loading screen, value = 2218749952 memory loading, value = 2147483648 trailer, value = 13421778 credidation, 
+value = 2081454128 if space not pressed fast enough at start):
+	base address: "pcsx2.exe"+0123F2B8
+	offset: 1C8
+
+Select Continue to start game (value = 0 continue, value = 1065353216 for new game):
+	base address: "pcsx2.exe"+0124072C
+	offset: AE4
+
+Main Menu (duel value = 144)
+	base address: "pcsx2.exe"+00727834
+	offset: F4C 34 0 180 38 68 E4

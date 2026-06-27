@@ -27,7 +27,12 @@ class VectorizedDBZEnv:
 
     def __init__(self, num_envs: int, env_kwargs: dict) -> None:
         self.num_envs = num_envs
-        self.envs = [DBZ_Env(**env_kwargs, env_idx=i) for i in range(num_envs)]
+        # Only the first env navigates to the fight screen; the rest attach
+        # to their window and hook memory without re-running the menu sequence.
+        self.envs = [
+            DBZ_Env(**env_kwargs, env_idx=i, navigate=(i == 0))
+            for i in range(num_envs)
+        ]
         self.executor = ThreadPoolExecutor(max_workers=num_envs)
 
     def reset(self) -> list:

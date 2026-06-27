@@ -6,6 +6,7 @@ import argparse
 import json
 import math
 import random
+import subprocess
 import sys
 import threading
 import time
@@ -39,12 +40,12 @@ class TrainConfig(BaseModel):
     tau: float = 0.005
     num_episodes: int = 150
     obs_buffer: int = 4
-    replay_capacity: int = 10_000
+    replay_capacity: int = 50_000
     img_size: int = 128
     weight_decay: float = 1e-5
     grad_clip: float = 100.0
     early_stopping_patience: int = 20
-    early_stopping_min_delta: float = 0.001
+    early_stopping_min_delta: float = 0.01
 
 
 class ExperimentConfig(BaseModel):
@@ -269,7 +270,7 @@ if __name__ == "__main__":
     parser.add_argument("--save-data",       action="store_true",
                         help="Save gameplay transitions to HDF5")
     parser.add_argument("--num-envs",  type=int, default=1, help="Number of parallel DBZ windows")
-    parser.add_argument("--patience",  type=int, default=5, help="Early stopping patience (episodes)")
+    parser.add_argument("--patience",  type=int, default=10, help="Early stopping patience (episodes)")
 
     args = parser.parse_args()
 
@@ -342,7 +343,6 @@ if __name__ == "__main__":
         meta = CheckpointMeta(**ckpt["meta"])
         policy_net.load_state_dict(ckpt["model_state_dict"])
         target_net.load_state_dict(ckpt["model_state_dict"])
-        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         episode_start       = meta.episode + 1
         all_episode_rewards = meta.all_episode_rewards
         max_reward          = max(all_episode_rewards) if all_episode_rewards else 0.0
@@ -387,7 +387,7 @@ if __name__ == "__main__":
                 step_cnt       += 1
                 done = terminated or truncated
 
-                next_obs_t = torch.tensor(next_obs, dtype=torch.float32).unsqueeze(0)
+                next_obs_t = None if terminated else torch.tensor(next_obs, dtype=torch.float32).unsqueeze(0)
                 reward_t   = torch.tensor([reward])
 
                 t = Transition(state=obs, action=actions, next_state=next_obs_t, reward=reward_t)
@@ -521,6 +521,15 @@ if __name__ == "__main__":
     if vec_env is not None:
         vec_env.close()
     writer.close()
+
+    print("Terminating PCSX2...")
+    try:
+        subprocess.run(["taskkill", "/F", "/IM", "pcsx2.exe"], check=True, capture_output=True)
+        print("PCSX2 terminated.")
+    except subprocess.CalledProcessError:
+        print("PCSX2 process not found or already exited.")
+    except Exception as e:
+        print(f"Failed to terminate PCSX2: {e}")
 
     results = ExperimentResults(
         model_name=exp.model_name,
