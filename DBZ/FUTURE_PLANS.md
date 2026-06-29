@@ -1,5 +1,10 @@
 # Future Plans
 
+## ForecastDQN
+
+- Change GRU to Transformer to capture longer context windows before passing Z to forecasting head.
+- Track actions across all frames instead of the last one for a better control model.
+
 ## Option 2: PINE IPC MCP Server (PCSX2 1.7+ / PCSX2-QT)
 
 ### What is PINE?
