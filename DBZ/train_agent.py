@@ -22,7 +22,7 @@ from torch import Tensor, nn, optim
 from torch.utils.tensorboard import SummaryWriter
 
 from Custom_DBZ_Game import DBZ_Env
-from models import ViT, PreTrained_DeiTModel, cnn_fc, dueling_cnn
+from models import ViT, PreTrained_DeiTModel, cnn_fc, dueling_cnn, ForecastDQN
 from vec_env import VectorizedDBZEnv
 
 
@@ -46,6 +46,10 @@ class TrainConfig(BaseModel):
     grad_clip: float = 100.0
     early_stopping_patience: int = 20
     early_stopping_min_delta: float = 0.01
+    latent_dim: int = 512
+    td_loss_weight: float = 1.0
+    recon_loss_weight: float = 1.0
+    transition_loss_weight: float = 0.1
 
 
 class ExperimentConfig(BaseModel):
@@ -103,6 +107,77 @@ class ReplayMemory:
 
 
 # ---------------------------------------------------------------------------
+# PCGrad — gradient surgery for multi-task learning (Yu et al., 2020)
+# ---------------------------------------------------------------------------
+
+class PCGrad:
+    """Optimizer wrapper that projects conflicting per-task gradients before summing.
+
+    Usage:
+        optimizer = PCGrad(optim.NAdam(params))
+        optimizer.pc_backward([loss_td, loss_recon, loss_trans])
+        clip_grad_value_(params, clip)
+        optimizer.step()
+    """
+
+    def __init__(self, optimizer: optim.Optimizer) -> None:
+        self._optim = optimizer
+
+    @property
+    def param_groups(self) -> list:
+        return self._optim.param_groups
+
+    def zero_grad(self) -> None:
+        self._optim.zero_grad()
+
+    def step(self) -> None:
+        self._optim.step()
+
+    def state_dict(self) -> dict:
+        return self._optim.state_dict()
+
+    def load_state_dict(self, sd: dict) -> None:
+        self._optim.load_state_dict(sd)
+
+    def pc_backward(self, losses: list[Tensor]) -> None:
+        """Compute per-task gradients, project conflicting directions, sum, and set .grad."""
+        params = [p for group in self._optim.param_groups
+                  for p in group["params"] if p.requires_grad]
+        n = len(losses)
+
+        # One backward per task to isolate its gradient
+        task_grads: list[list[Tensor]] = []
+        for i, loss in enumerate(losses):
+            self._optim.zero_grad()
+            loss.backward(retain_graph=(i < n - 1))
+            task_grads.append([
+                p.grad.clone() if p.grad is not None else torch.zeros_like(p)
+                for p in params
+            ])
+
+        # Project each task's gradient against all others (random order per paper)
+        projected = [list(gs) for gs in task_grads]
+        order = list(range(n))
+        for i in range(n):
+            random.shuffle(order)
+            for j in order:
+                if i == j:
+                    continue
+                for k in range(len(params)):
+                    gi = projected[i][k]
+                    gj = task_grads[j][k]
+                    dot = torch.dot(gi.flatten(), gj.flatten())
+                    if dot < 0:
+                        norm_sq = (gj.flatten() @ gj.flatten()) + 1e-12
+                        projected[i][k] = gi - (dot / norm_sq) * gj
+
+        # Write summed projected gradients back to .grad
+        self._optim.zero_grad()
+        for k, p in enumerate(params):
+            p.grad = sum(pg[k] for pg in projected)
+
+
+# ---------------------------------------------------------------------------
 # Model registry — add new models here
 # To register a new model:
 #   1. Create models/<name>/<name>.py with the nn.Module subclass
@@ -114,6 +189,7 @@ MODEL_REGISTRY: dict[str, type[nn.Module]] = {
     "dueling_cnn": dueling_cnn,
     "vit": ViT,
     "pretrained_deit": PreTrained_DeiTModel,
+    "forecast_dqn": ForecastDQN,
 }
 
 
@@ -126,6 +202,9 @@ def build_model(exp: ExperimentConfig, cfg: TrainConfig, n_actions: int) -> nn.M
         )
     if exp.model_name == "pretrained_deit":
         return cls(in_channels=cfg.obs_buffer, num_classes=n_actions)
+    if exp.model_name == "forecast_dqn":
+        return cls(in_channels=1, seq_length=cfg.obs_buffer,
+                   img_size=cfg.img_size, n_actions=n_actions)
     return cls(in_channels=cfg.obs_buffer, num_classes=n_actions,
                img_shape=(cfg.img_size, cfg.img_size))
 
@@ -150,6 +229,24 @@ def select_action(
     return torch.tensor([[env.action_space.sample()]], dtype=torch.long, device=device), 0.1
 
 
+def _grad_cosine_sim(loss_a: Tensor, loss_b: Tensor, params: list) -> float:
+    """Cosine similarity between the gradient vectors of two scalar losses.
+
+    Uses autograd.grad so .grad buffers are untouched — safe to call before
+    the real backward pass.
+    """
+    def flat_grad(loss: Tensor) -> Tensor:
+        grads = torch.autograd.grad(loss, params, retain_graph=True, allow_unused=True)
+        # Replace None (unused param) with zeros so both vectors stay the same length
+        return torch.cat([
+            g.flatten() if g is not None else torch.zeros_like(p).flatten()
+            for g, p in zip(grads, params)
+        ])
+    g_a = flat_grad(loss_a)
+    g_b = flat_grad(loss_b)
+    return torch.nn.functional.cosine_similarity(g_a.unsqueeze(0), g_b.unsqueeze(0)).item()
+
+
 def optimize_model(
     policy_net: nn.Module,
     target_net: nn.Module,
@@ -158,7 +255,7 @@ def optimize_model(
     criterion: nn.Module,
     cfg: TrainConfig,
     device: torch.device,
-) -> Optional[float]:
+) -> Optional[dict[str, float]]:
     if len(memory) < cfg.batch_size:
         return None
 
@@ -177,31 +274,104 @@ def optimize_model(
 
     optimizer.zero_grad()
 
-    state_action_preds, state_duration_preds = policy_net(state_batch)
-    state_action_values = state_action_preds.gather(1, action_batch)
+    if isinstance(policy_net, ForecastDQN):
+        # --- ForecastDQN path ---
+        seq_len = policy_net.seq_len
 
-    next_state_values        = torch.zeros(cfg.batch_size, device=device)
-    next_state_duration_vals = torch.zeros(cfg.batch_size, device=device)
-    with torch.no_grad():
-        next_preds, next_duration_preds = target_net(non_final_next_states)
-        next_state_values[non_final_mask]        = next_preds.max(1).values.to(next_state_values.dtype)
-        next_state_duration_vals[non_final_mask] = next_duration_preds.squeeze().to(next_state_duration_vals.dtype)
+        # state_batch contains seq_len+1 frames; split into input sequence and forecast target
+        input_frames = state_batch[:, :seq_len]          # (B, T, H, W)
+        target_frame = state_batch[:, seq_len].unsqueeze(1)  # (B, 1, H, W)
 
-    expected_action_values   = (next_state_values        * cfg.gamma) + reward_batch
-    expected_duration_values = (next_state_duration_vals * cfg.gamma) + reward_batch
+        Z, Z_h = policy_net.encode(input_frames)          # (B,T,enc_dim), (B,hidden_dim)
 
-    # scale to prevent large Q-values destabilising loss
-    action_loss   = criterion(state_action_values.squeeze()  / 10.0, expected_action_values   / 10.0)
-    # duration_loss disabled: duration is a continuous control output, not a Q-value;
-    # applying the Bellman equation to it is undefined and adds gradient noise to shared CNN layers.
-    # duration_loss = criterion(state_duration_preds.squeeze() / 10.0, expected_duration_values / 10.0)
-    total_loss = action_loss
+        # Q values are unconditional on action — computed from GRU hidden state
+        Q_all   = policy_net.action_values(Z_h)           # (B, n_actions)
+        Q_taken = Q_all.gather(1, action_batch)
 
-    total_loss.backward()
+        # TD target from frozen target network
+        with torch.no_grad():
+            next_state_values = torch.zeros(cfg.batch_size, device=device)
+            if non_final_mask.any():
+                nf_input = non_final_next_states[:, :seq_len]
+                _, Z_h_next = target_net.encode(nf_input)
+                next_state_values[non_final_mask] = target_net.action_values(Z_h_next).max(1).values
+        expected_q = (next_state_values * cfg.gamma) + reward_batch
+        td_loss = criterion(Q_taken.squeeze() / 10.0, expected_q / 10.0)
+
+        # Transition loss: Z_fore (action-conditioned forecast) should match target encoder output of next frame
+        action_oh = torch.nn.functional.one_hot(
+            action_batch.squeeze(1), policy_net.n_actions
+        ).float()
+        Z_fore = policy_net.forecast(torch.cat([Z_h, action_oh], dim=-1))  # (B, enc_dim)
+        with torch.no_grad():
+            # Frozen target encoder provides a stable supervision signal in enc_dim space
+            Z_target = target_net.frame_encoder(target_frame)  # (B, enc_dim)
+        # Normalize to unit vectors before MSE to bound the loss to [0, 2] and
+        # prevent divergence from unbounded latent scale.
+        Z_fore_n   = torch.nn.functional.normalize(Z_fore,   dim=-1)
+        Z_target_n = torch.nn.functional.normalize(Z_target, dim=-1)
+        # Skip transition loss for terminal transitions (target frame is a zero pad)
+        trans_loss = torch.nn.functional.mse_loss(
+            Z_fore_n[non_final_mask], Z_target_n[non_final_mask]
+        ).sqrt() if non_final_mask.any() else torch.tensor(0.0, device=device)
+
+        # Reconstruction loss: decode the last input frame's latent back to pixels
+        # input_frames[:, -1:] is (B, 1, H, W); recon is (B, 1, H, W)
+        recon = policy_net.frame_decoder(Z[:, -1, :])           # (B, 1, H, W)
+        recon_loss = torch.nn.functional.mse_loss(
+            recon, input_frames[:, -1:]
+        ).sqrt()
+
+        weighted_td    = cfg.td_loss_weight        * td_loss
+        weighted_trans = cfg.transition_loss_weight * trans_loss
+        weighted_recon = cfg.recon_loss_weight      * recon_loss
+
+        trainable = [p for p in policy_net.parameters() if p.requires_grad]
+        cos_td_recon    = _grad_cosine_sim(weighted_td,    weighted_recon, trainable)
+        cos_td_trans    = _grad_cosine_sim(weighted_td,    weighted_trans, trainable)
+        cos_recon_trans = _grad_cosine_sim(weighted_recon, weighted_trans, trainable)
+
+        total_loss = weighted_td + weighted_trans + weighted_recon
+        total_loss.backward()
+
+        loss_info = {
+            "total":         total_loss.item(),
+            "td":            td_loss.item(),
+            "transition":    trans_loss.item(),
+            "recon":         recon_loss.item(),
+            "cos_td_recon":    cos_td_recon,
+            "cos_td_trans":    cos_td_trans,
+            "cos_recon_trans": cos_recon_trans,
+        }
+
+    else:
+        # --- Standard DQN path ---
+        state_action_preds, state_duration_preds = policy_net(state_batch)
+        state_action_values = state_action_preds.gather(1, action_batch)
+
+        next_state_values        = torch.zeros(cfg.batch_size, device=device)
+        next_state_duration_vals = torch.zeros(cfg.batch_size, device=device)
+        with torch.no_grad():
+            next_preds, next_duration_preds = target_net(non_final_next_states)
+            next_state_values[non_final_mask]        = next_preds.max(1).values.to(next_state_values.dtype)
+            next_state_duration_vals[non_final_mask] = next_duration_preds.squeeze().to(next_state_duration_vals.dtype)
+
+        expected_action_values   = (next_state_values        * cfg.gamma) + reward_batch
+        expected_duration_values = (next_state_duration_vals * cfg.gamma) + reward_batch
+
+        # scale to prevent large Q-values destabilising loss
+        action_loss = criterion(state_action_values.squeeze() / 10.0, expected_action_values / 10.0)
+        # duration_loss disabled: duration is a continuous control output, not a Q-value;
+        # applying the Bellman equation to it is undefined and adds gradient noise to shared CNN layers.
+        # duration_loss = criterion(state_duration_preds.squeeze() / 10.0, expected_duration_values / 10.0)
+        total_loss = action_loss
+        loss_info = {"total": total_loss.item()}
+        total_loss.backward()
+
     torch.nn.utils.clip_grad_value_(policy_net.parameters(), cfg.grad_clip)
     optimizer.step()
 
-    return total_loss.item()
+    return loss_info
 
 
 def soft_update(policy_net: nn.Module, target_net: nn.Module, tau: float) -> None:
@@ -328,6 +498,9 @@ if __name__ == "__main__":
     optimizer = optim.NAdam(policy_net.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     criterion = nn.SmoothL1Loss()
     memory    = ReplayMemory(cfg.replay_capacity)
+
+    if exp.model_name == "world_model_dqn":
+        optimizer = PCGrad(optimizer)
     writer    = SummaryWriter(log_dir=str(log_dir))
 
     # --- state ---------------------------------------------------------------
@@ -367,10 +540,16 @@ if __name__ == "__main__":
         ep_start = time.time()
         print(f"Episode {i_episode + 1} / {episode_start + cfg.num_episodes}")
 
-        episode_reward = 0.0
-        step_cnt       = 0
-        episode_loss   = 0.0
-        loss_steps     = 0
+        episode_reward     = 0.0
+        step_cnt           = 0
+        episode_loss         = 0.0
+        episode_td_loss      = 0.0
+        episode_recon_loss   = 0.0
+        episode_trans_loss      = 0.0
+        episode_cos_td_recon    = 0.0
+        episode_cos_td_trans    = 0.0
+        episode_cos_recon_trans = 0.0
+        loss_steps              = 0
 
         if exp.num_envs == 1:
             # ---- single-env path (unchanged) --------------------------------
@@ -390,14 +569,29 @@ if __name__ == "__main__":
                 next_obs_t = None if terminated else torch.tensor(next_obs, dtype=torch.float32).unsqueeze(0)
                 reward_t   = torch.tensor([reward])
 
-                t = Transition(state=obs, action=actions, next_state=next_obs_t, reward=reward_t)
+                if isinstance(policy_net, ForecastDQN):
+                    # Store T+1 frames: T input frames + the next frame as forecast target
+                    if next_obs_t is not None:
+                        forecast_target = next_obs_t[:, -1:]
+                    else:
+                        forecast_target = torch.zeros_like(obs[:, -1:])
+                    state_mem = torch.cat([obs, forecast_target], dim=1)
+                else:
+                    state_mem = obs
+                t = Transition(state=state_mem, action=actions, next_state=next_obs_t, reward=reward_t)
                 memory.push(t)
                 obs = next_obs_t
 
                 loss = optimize_model(policy_net, target_net, optimizer, memory, criterion, cfg, device)
                 if loss is not None:
-                    episode_loss += loss
-                    loss_steps   += 1
+                    episode_loss         += loss["total"]
+                    episode_td_loss      += loss.get("td", 0.0)
+                    episode_recon_loss   += loss.get("recon", 0.0)
+                    episode_trans_loss      += loss.get("transition", 0.0)
+                    episode_cos_td_recon    += loss.get("cos_td_recon", 0.0)
+                    episode_cos_td_trans    += loss.get("cos_td_trans", 0.0)
+                    episode_cos_recon_trans += loss.get("cos_recon_trans", 0.0)
+                    loss_steps              += 1
 
                 soft_update(policy_net, target_net, cfg.tau)
 
@@ -443,7 +637,15 @@ if __name__ == "__main__":
                     reward_t   = torch.tensor([reward])
                     action_t   = torch.tensor([[actions_list[i]]], dtype=torch.long)
 
-                    t = Transition(state=obs_list[i], action=action_t,
+                    if isinstance(policy_net, ForecastDQN):
+                        if not done_i:
+                            forecast_target = next_obs_t[:, -1:]
+                        else:
+                            forecast_target = torch.zeros_like(obs_list[i][:, -1:])
+                        state_mem = torch.cat([obs_list[i], forecast_target], dim=1)
+                    else:
+                        state_mem = obs_list[i]
+                    t = Transition(state=state_mem, action=action_t,
                                    next_state=None if done_i else next_obs_t,
                                    reward=reward_t)
                     memory.push(t)
@@ -452,8 +654,14 @@ if __name__ == "__main__":
 
                 loss = optimize_model(policy_net, target_net, optimizer, memory, criterion, cfg, device)
                 if loss is not None:
-                    episode_loss += loss
-                    loss_steps   += 1
+                    episode_loss         += loss["total"]
+                    episode_td_loss      += loss.get("td", 0.0)
+                    episode_recon_loss   += loss.get("recon", 0.0)
+                    episode_trans_loss      += loss.get("transition", 0.0)
+                    episode_cos_td_recon    += loss.get("cos_td_recon", 0.0)
+                    episode_cos_td_trans    += loss.get("cos_td_trans", 0.0)
+                    episode_cos_recon_trans += loss.get("cos_recon_trans", 0.0)
+                    loss_steps              += 1
 
                 soft_update(policy_net, target_net, cfg.tau)
 
@@ -475,7 +683,14 @@ if __name__ == "__main__":
         ep_cnt      += 1
 
         eps        = cfg.eps_end + (cfg.eps_start - cfg.eps_end) * math.exp(-steps_done / cfg.eps_decay)
-        avg_loss   = episode_loss / loss_steps if loss_steps > 0 else 0.0
+        _ls        = loss_steps if loss_steps > 0 else 1
+        avg_loss         = episode_loss         / _ls
+        avg_td_loss      = episode_td_loss      / _ls
+        avg_recon_loss   = episode_recon_loss   / _ls
+        avg_trans_loss      = episode_trans_loss      / _ls
+        avg_cos_td_recon    = episode_cos_td_recon    / _ls
+        avg_cos_td_trans    = episode_cos_td_trans    / _ls
+        avg_cos_recon_trans = episode_cos_recon_trans / _ls
         moving_avg = sum(all_episode_rewards[-10:]) / min(len(all_episode_rewards), 10)
 
         if moving_avg > best_moving_avg + cfg.early_stopping_min_delta:
@@ -491,6 +706,13 @@ if __name__ == "__main__":
         writer.add_scalar("reward/episode",           avg_reward,   i_episode)
         writer.add_scalar("reward/moving_avg",        moving_avg,   i_episode)
         writer.add_scalar("loss/policy",              avg_loss,     i_episode)
+        if isinstance(policy_net, ForecastDQN):
+            writer.add_scalar("loss/td",              avg_td_loss,         i_episode)
+            writer.add_scalar("loss/reconstruction",  avg_recon_loss,      i_episode)
+            writer.add_scalar("loss/transition",      avg_trans_loss,      i_episode)
+            writer.add_scalar("grad/cos_td_recon",    avg_cos_td_recon,    i_episode)
+            writer.add_scalar("grad/cos_td_trans",    avg_cos_td_trans,    i_episode)
+            writer.add_scalar("grad/cos_recon_trans", avg_cos_recon_trans, i_episode)
         writer.add_scalar("epsilon",                  eps,          i_episode)
         writer.add_scalar("timing/episode_wall_time", ep_wall_time, i_episode)
         writer.add_scalar("vram/peak_gb",             vram_peak_gb, i_episode)
@@ -499,6 +721,11 @@ if __name__ == "__main__":
               f"Wins: {player_wins} | Losses: {ep_cnt - player_wins} | "
               f"Opp health: {min_opp_health} | Wall time: {ep_wall_time:.1f}s | "
               f"VRAM: {vram_peak_gb:.2f} GB")
+        if isinstance(policy_net, ForecastDQN):
+            print(f"  Loss total={avg_loss:.4f} | td={avg_td_loss:.4f} | "
+                  f"recon={avg_recon_loss:.4f} | trans={avg_trans_loss:.4f} | "
+                  f"cos(td,recon)={avg_cos_td_recon:.3f} | cos(td,trans)={avg_cos_td_trans:.3f} | "
+                  f"cos(recon,trans)={avg_cos_recon_trans:.3f}")
 
         should_save = (
             min_opp_health < opp_health_tracker

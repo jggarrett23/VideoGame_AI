@@ -1,11 +1,12 @@
 param(
-    [string]$Model           = "dueling_cnn",
+    [string]$Model           = "forecast_dqn",
     [int]$Episodes           = 10,
     [float]$Lr               = 1e-3,
     [int]$BatchSize          = 32,
-    [int]$NumEnvs            = 2,
+    [int]$NumEnvs            = 1,
     [switch]$LoadCheckpoint,
-    [switch]$SaveData
+    [switch]$SaveData,
+    [int]$Patience           = 10
 )
 
 $startTime      = Get-Date
@@ -25,9 +26,10 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # Build argument list
-$trainArgs = @("$pythonScript", "--model", $Model, "--episodes", $Episodes, "--lr", $Lr, "--batch-size", $BatchSize, "--num-envs", $NumEnvs)
+$trainArgs = @("$pythonScript", "--model", $Model, "--episodes", $Episodes, "--lr", $Lr, "--batch-size", $BatchSize, "--num-envs", $NumEnvs, "--patience", $Patience)
 if ($LoadCheckpoint) { $trainArgs += "--load-checkpoint" }
 if ($SaveData)       { $trainArgs += "--save-data" }
+
 
 Write-Host "Running: python $($trainArgs -join ' ')"
 

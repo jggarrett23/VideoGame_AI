@@ -260,3 +260,142 @@ class dueling_cnn(nn.Module):
 
         duration = torch.clamp(self.duration_fc(features), min=0.1, max=6)
         return q_values, duration
+
+
+
+
+class ConvEncoder(nn.Module):
+    def __init__(self, in_channels, enc_dim) -> None:
+        super().__init__()
+
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_channels, 32, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(32),
+            nn.LeakyReLU(0.2),
+
+            nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(64),
+            nn.LeakyReLU(0.2),
+
+            nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(128),
+            nn.LeakyReLU(0.2),
+
+            nn.Conv2d(128, 256, kernel_size=4, stride=2, padding=1),
+            nn.LeakyReLU(0.2)
+        )
+
+        self.flatten = nn.Flatten()
+        self.fc = nn.Linear(256*8*8, enc_dim)
+
+    def forward(self, X: torch.Tensor) -> torch.Tensor:
+        X = self.conv(X)
+        X = self.flatten(X)
+        return self.fc(X)
+
+class ConvDecoder(nn.Module):
+    def __init__(self, latent_channels, out_channels):
+        super().__init__()
+        self.fc = nn.Linear(latent_channels, 256 * 8 * 8)
+        self.unflatten = nn.Unflatten(1, (256, 8, 8))
+
+        self.deconv_layers = nn.Sequential(
+            nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(),
+
+            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+
+            nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            nn.ConvTranspose2d(32, out_channels, kernel_size=4, stride=2, padding=1),
+            nn.Sigmoid()
+        )
+        
+    def forward(self, X: torch.Tensor) -> torch.Tensor:
+        X = self.fc(X)
+        X = self.unflatten(X)
+        return self.deconv_layers(X)
+
+
+class ForecastDQN(nn.Module):
+    def __init__(
+        self,
+        in_channels: int = 1,
+        img_size: int = 128,
+        seq_length: int = 4,
+        enc_dim: int = 256,
+        hidden_dim: int = 128,
+        n_actions: int = 18,
+        num_classes: int = 18,
+        img_shape: tuple = (128, 128)
+        ):
+        super().__init__()
+
+        self.n_actions = n_actions or num_classes
+        self.enc_dim = enc_dim
+        self.hidden_dim = hidden_dim
+        self.seq_len = seq_length
+
+        self.frame_encoder = ConvEncoder(in_channels, enc_dim)
+        self.frame_decoder = ConvDecoder(enc_dim, in_channels)
+
+        self.dynamics = nn.GRU(
+            input_size=enc_dim,
+            hidden_size=hidden_dim,
+            batch_first=True
+        )
+
+        # Forecasts next frame latent from GRU hidden state + action one-hot (training only).
+        # Output is enc_dim so it can be directly compared to target_net.frame_encoder output.
+        self.forecast = nn.Sequential(
+            nn.Linear(hidden_dim + self.n_actions, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, enc_dim),
+        )
+
+        self.z_h_norm = nn.LayerNorm(hidden_dim)
+
+        self.action_values = nn.Linear(
+            in_features=hidden_dim,
+            out_features=self.n_actions
+        )
+
+        self.duration_head = nn.Linear(
+            in_features=hidden_dim,
+            out_features=1
+        )
+
+    def encode(self, X: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Encode a sequence of frames through CNN and GRU.
+
+        Args:
+            X: (B, T, H, W) or (B, T, C, H, W) — T stacked grayscale frames
+        Returns:
+            Z:   (B, T, enc_dim) — per-frame CNN latents
+            Z_h: (B, hidden_dim) — GRU hidden state after the full sequence
+        """
+        if X.dim() == 4:
+            X = X.unsqueeze(2)  # (B, T, H, W) -> (B, T, 1, H, W)
+        B, T, C, H, W = X.size()
+        Z = self.frame_encoder(X.reshape(-1, C, H, W))  # (B*T, enc_dim)
+        Z = Z.view(B, T, -1)                          # (B, T, enc_dim)
+        # Detach so GRU/forecast/TD gradients don't flow back into the frame encoder;
+        # the encoder is trained only by the reconstruction loss.
+        _, Z_h = self.dynamics(Z.detach())            # Z_h: (1, B, hidden_dim)
+        return Z, self.z_h_norm(Z_h.squeeze(0))      # (B, T, enc_dim), (B, hidden_dim)
+
+    def forward(self, X: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Action-selection forward pass — no action input needed.
+
+        Args:
+            X: (B, T, C, H, W) — T stacked grayscale frames
+        Returns:
+            Q: (B, n_actions)
+            D: (B, 1)
+        """
+        _, Z_h = self.encode(X)
+        return self.action_values(Z_h), self.duration_head(Z_h).clamp(0.1, 6.0)
